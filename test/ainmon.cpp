@@ -125,8 +125,8 @@ main(int argc, char *argv[] )
 		ain2 = read_ain(2 );
 		ain3 = read_ain(3 );
 		ain4 = read_ain(4 );
-		ain4 = read_ain(5 );
-		printf("%5d, %5d, %5d, %5d, %5d\n", ain0, ain1, ain2, ain3, ain4, ain5 );
+		ain5 = read_ain(5 );
+		printf("%5d, %5d, %5d, %5d, %5d, %5d\n", ain0, ain1, ain2, ain3, ain4, ain5 );
 		
 		usleep(1000000 );
 	}
