@@ -17,6 +17,26 @@
  * You should have received a copy of the GNU General Public License 
  * along with this program. If not, see <http://www.gnu.org/licenses/>.
 */
+
+/*
+ * Supports the ID-Innovations devices:
+	ID-2LA, ID-12LA, ID-20LA
+		These devices use a serial IO sequence:
+			STX			02h
+			Data		10 byte ASCII sequence example: "0C000621a58E"
+			Checksum	2 bytes ASCII
+			CR			13h
+			LF			10h
+			ETX			03h
+			
+ * Supports the simpler Seeed-Studio device. This device sends
+	5 Hex values as the serial data.
+			Start		00h
+			Data		3 bytes ID
+			Checksum	1 byte checksum
+			
+*/
+
 #include <iostream>
 #include <string>
 #include <unistd.h>
@@ -118,6 +138,40 @@ ttyPurge(int ttyfd )
 {
 	
 }
+
+int checkBitValidationSEED(char *data)
+{
+	if( data[4] == ( data[0]^data[1]^data[2]^data[3] ) )
+	{
+		return 1;
+	} else
+	{
+		return 0;
+	}
+}
+
+unsigned long cardNumberSEEED(char *data)
+{
+	unsigned long sum = 0;
+	unsigned long sum2 = 0;
+	
+	if ( 0 != data[0] ) 
+	{
+		sum = sum + data[0];
+		sum = sum<<24;
+	}
+	sum = sum + data[1];
+	sum = sum << 16;
+
+	sum2 = sum2  + data[2];
+	sum2 = sum2 <<8;
+	sum2 = sum2  + data[3];
+
+	sum = sum + sum2;
+
+    return sum;
+}
+
 int main(int argc, char *argv[])
 {
 	int sts;
@@ -295,22 +349,27 @@ int main(int argc, char *argv[])
 			case 0: // Waiting for detect
 				if ( detect )
 				{
-					state = 1;
+					state = 2;
+					count = 0;
 					tagBuffer[0] = 0;
-					sprintf(msgbuf, "Detect %d : State 1", detect );
-					
+					sprintf(msgbuf, "Detect %d : State 2", detect );
+					if ( verbose )
+					{
+						log_message("", msgbuf);
+					}
 					if ( debug )
 					{
 						printf("%s\n", msgbuf );
 					}
-					log_message("", msgbuf);
+					
 				}
 				else
 				{
 					shmData->auscultation.side = 0;
 				}
 				break;
-			case 1: // Waiting for STX
+
+			case 2: // Detect Received, Reading string from reader
 				if ( ! detect )
 				{
 					if ( rfidData->tagDetected == 1 )
@@ -319,65 +378,21 @@ int main(int argc, char *argv[])
 						{
 							printf("End\n" );
 						}
-						sprintf(msgbuf, "End (1)" );
-						log_message("", msgbuf);
-						rfidData->tagDetected = 0;
-					}
-					shmData->auscultation.side = 0;
-					tcflush (ttyfd, TCIOFLUSH);
-					sprintf(msgbuf, "Detect  State 1 to 0 %02xh", tagBuffer[0] );
-					log_message("", msgbuf);
-					state = 0;
-				}
-				else
-				{
-					sts = read(ttyfd, tagBuffer, 1 );
-					if ( sts > 0 )
-					{
-						if ( tagBuffer[0] == 0x02 )
+						if ( verbose )
 						{
-							state = 2;
-							count = 0;
+							sprintf(msgbuf, "End (2)" );
+							log_message("", msgbuf);
 						}
-						else
-						{
-							if ( debug )
-							{
-								if ( sts < 0 )
-								{
-									perror("Read" );
-								}
-								else if ( sts > 0 )
-								{
-									printf("STS %d - Char 0x%02x\n", sts, tagBuffer[0] );
-								}
-							}
-							else
-							{
-								sprintf(msgbuf, "State 1 STS %d Char %02xh", sts, (unsigned int)tagBuffer[0] );
-								log_message("", msgbuf);
-							}
-						}
-					}
-				}
-				break;
-			case 2: // STX Received, Reading chars
-				if ( ! detect )
-				{
-					if ( rfidData->tagDetected == 1 )
-					{
-						if ( debug )
-						{
-							printf("End\n" );
-						}
-						sprintf(msgbuf, "End (2)" );
-						log_message("", msgbuf);
 						rfidData->tagDetected = 0;						
 					}
 					shmData->auscultation.side = 0;
-					sprintf(msgbuf, "Detect  0 State 2 to 0 Count %d", count );
-					log_message("", msgbuf);
+					if ( verbose )
+					{
+						sprintf(msgbuf, "Detect  0 State 2 to 0 Count %d", count );
+						log_message("", msgbuf);
+					}
 					state = 0;
+					count = 0;
 				}
 				else
 				{
@@ -389,19 +404,39 @@ int main(int argc, char *argv[])
 					else
 					{
 						sts = read(ttyfd, &tagBuffer[count], TAG_BUF_LEN - count );
-						if ( sts )
+						if ( sts > 0 )
 						{
 							count += sts;
+							if ( count == 5 )
+							{
+								// Test for valid data from SEED reader
+								if ( checkBitValidationSEED(tagBuffer ) )
+								{
+									newid = cardNumberSEEED(tagBuffer );
+									rfidData->tagDetected = 1;
+									
+									tagIndex = tagCheck(newid );
+									sprintf(msgbuf, "Tag %lld - %d", newid, tagIndex );
+									log_message("", msgbuf);
+									if ( debug )
+									{
+										printf(" Tag %lld - %d\n", newid, tagIndex );
+									}
+									sprintf(shmData->auscultation.tag, "%lld", newid );
+									state = 3;
+									count = 0;
+								}
+							}
 							if ( tagBuffer[count-1] == 0x03 )
 							{
 								// Full tag received - Report and continue looking for STX
-								if ( count >= 12 )
+								if ( count >= 13 )
 								{
 									// Find the tagID in the table and set it as active
 									rfidData->tagDetected = 1;
 									newid = 0;
 
-									for ( i = 0 ; i < 14 ; i++ )
+									for ( i = 1 ; i < 15 ; i++ )
 									{
 										if ( debug )
 										{
@@ -428,7 +463,7 @@ int main(int argc, char *argv[])
 												printf(" : " );
 											}
 										}
-										if ( ( i > 1 ) && ( i < 10 ) )
+										if ( ( i > 2 ) && ( i < 11 ) )
 										{
 											if ( ( tagBuffer[i] >= '0' ) && ( tagBuffer[i] <= '9' ) )
 											{
@@ -448,14 +483,47 @@ int main(int argc, char *argv[])
 										printf(" Tag %lld - %d\n", newid, tagIndex );
 									}
 									sprintf(shmData->auscultation.tag, "%lld", newid );
+									
+									state = 3;
+									count = 0;
 								}
-								state = 1;
-								count = 0;
 							}
 						}
 					}
 				}
 				break;
+
+			
+			case 3: // Wait for loss of detect
+				if ( ! detect )
+				{
+					if ( rfidData->tagDetected == 1 )
+					{
+						if ( debug )
+						{
+							printf("End\n" );
+						}
+						if ( verbose )
+						{
+							sprintf(msgbuf, "End (3)" );
+							log_message("", msgbuf);
+						}
+						rfidData->tagDetected = 0;						
+					}
+					shmData->auscultation.side = 0;
+					if ( verbose )
+					{
+						sprintf(msgbuf, "Detect 0 State 3 to 0" );
+						log_message("", msgbuf);
+					}
+					state = 0;
+					count = 0;
+				}
+				else
+				{
+					// Just to purge any extra characters
+					sts = read(ttyfd, &tagBuffer[0], TAG_BUF_LEN );
+				}
 		}
 		usleep(LOOP_SLEEP_US); // 10 ms delay between checks.
 	}
